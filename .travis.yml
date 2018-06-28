@@ -1,0 +1,79 @@
+# ASF is a C# project with solution named ArchiSteamFarm.sln
+language: csharp
+solution: ArchiSteamFarm.sln
+
+# Save bandwidth by limiting git clone to only last 10 commits
+git:
+  depth: 10
+
+# Don't build other branches than master
+# Sadly Travis doesn't support AppVeyor's "skip_branch_with_pr"
+branches:
+  only:
+    - master
+
+# Use latest images for building
+group: travis_latest
+
+# ASF is based on .NET Core platform
+dotnet: 2.1.300
+mono: none
+
+env:
+  global:
+    - CONFIGURATION: Release
+    - DOTNET_CLI_TELEMETRY_OPTOUT: 1
+    - DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
+    - NET_CORE_VERSION: netcoreapp2.1
+    - VARIANTS="generic linux-arm linux-x64 osx-x64 win-x64" # NOTE: When modifying variants, don't forget to update ASF_VARIANT definitions in SharedInfo.cs!
+
+before_script:
+  - |
+    set -e
+
+    if [ "$TRAVIS_OS_NAME" = "osx" ]; then
+        ulimit -n 1024
+    fi
+
+    dotnet --info
+
+script:
+  - |
+    set -e
+
+    dotnet build ArchiSteamFarm -c "$CONFIGURATION" -f "$NET_CORE_VERSION" -o 'out/source' /nologo
+    dotnet test ArchiSteamFarm.Tests -c "$CONFIGURATION" -f "$NET_CORE_VERSION" -o 'out/source' /nologo
+
+    publish() {
+        if [ "$1" = 'generic' ]; then
+            # TODO: Workaround https://github.com/mono/linker/issues/286 until it's resolved
+            # Don't forget to remove it from docker files too
+            dotnet publish ArchiSteamFarm -c "$CONFIGURATION" -f "$NET_CORE_VERSION" -o "out/${1}" /nologo "/p:ASFVariant=$1" "/p:LinkDuringPublish=false"
+        else
+            dotnet publish ArchiSteamFarm -c "$CONFIGURATION" -f "$NET_CORE_VERSION" -o "out/${1}" -r "$1" /nologo "/p:ASFVariant=$1" "/p:CrossGenDuringPublish=false"
+        fi
+
+        # If we include any helper scripts for this variant, copy them to output directory
+        if [ -d "ArchiSteamFarm/scripts/${1}" ]; then
+            cp "ArchiSteamFarm/scripts/${1}/"* "ArchiSteamFarm/out/${1}"
+        fi
+    }
+
+    for variant in $VARIANTS; do
+        publish "$variant" &
+    done
+
+    wait
+
+matrix:
+  # We can use fast finish, as we don't need to wait for allow_failures builds to mark build as success
+  fast_finish: true
+  include:
+    # We're building ASF with dotnet on latest versions of Linux and OS X
+    - os: linux
+      # Ref: https://docs.travis-ci.com/user/reference/trusty/
+      dist: trusty
+      sudo: false
+    - os: osx
+      # Ref: https://docs.travis-ci.com/user/reference/osx/
+      osx_image: xcode9.3

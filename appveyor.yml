@@ -1,0 +1,195 @@
+version: '{build}-{branch}'
+pull_requests:
+  do_not_increment_build_number: true
+branches:
+  only:
+  - master
+skip_branch_with_pr: true
+image:
+- Visual Studio 2017
+- Visual Studio 2017 Preview
+configuration: Release
+platform: Any CPU
+clone_depth: 10
+environment:
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  NET_CORE_VERSION: netcoreapp2.1
+  NET_FRAMEWORK_VERSION: net472
+  SINGLE_VARIANTS: generic-netf # NOTE: When modifying variants, don't forget to update ASF_VARIANT definitions in SharedInfo.cs!
+  VARIANTS: generic linux-arm linux-x64 osx-x64 win-x64 # NOTE: When modifying variants, don't forget to update ASF_VARIANT definitions in SharedInfo.cs!
+matrix:
+  allow_failures:
+    - image: Visual Studio 2017 Preview
+  fast_finish: true
+before_build:
+- pwsh: >-
+    Set-StrictMode -Version Latest
+
+    $ErrorActionPreference = 'Stop'
+
+    $ProgressPreference = 'SilentlyContinue'
+
+
+    dotnet --info
+
+    if ($LastExitCode -ne 0) {
+        throw "Last command failed."
+    }
+build_script:
+- pwsh: >-
+    Set-StrictMode -Version Latest
+
+    $ErrorActionPreference = 'Stop'
+
+    $ProgressPreference = 'SilentlyContinue'
+
+
+    dotnet build ArchiSteamFarm -c "$env:CONFIGURATION" -f "$env:NET_CORE_VERSION" -o 'out\source' /nologo
+
+    if ($LastExitCode -ne 0) {
+        throw "Last command failed."
+    }
+test_script:
+- pwsh: >-
+    Set-StrictMode -Version Latest
+
+    $ErrorActionPreference = 'Stop'
+
+    $ProgressPreference = 'SilentlyContinue'
+
+
+    dotnet test ArchiSteamFarm.Tests -c "$env:CONFIGURATION" -f "$env:NET_CORE_VERSION" -o 'out\source' /nologo
+
+    if ($LastExitCode -ne 0) {
+        throw "Last command failed."
+    }
+after_test:
+- pwsh: >-
+    Set-StrictMode -Version Latest
+
+    $ErrorActionPreference = 'Stop'
+
+    $ProgressPreference = 'SilentlyContinue'
+
+
+    $PublishBlock = {
+        param($variant)
+
+        Set-StrictMode -Version Latest
+        $ErrorActionPreference = 'Stop'
+        $ProgressPreference = 'SilentlyContinue'
+
+        Set-Location -Path "$env:APPVEYOR_BUILD_FOLDER"
+
+        if ($variant -like '*-netf') {
+            $compressionMethod = 'Deflate' # This depends on what ZipArchive supports on given platform
+            $targetFramework = $env:NET_FRAMEWORK_VERSION
+        } else {
+            $compressionMethod = 'Deflate64' # This depends on what ZipArchive supports on given platform
+            $targetFramework = $env:NET_CORE_VERSION
+        }
+
+        if ($variant -like 'generic*') {
+            # TODO: Workaround https://github.com/mono/linker/issues/286 until it's resolved
+            # Don't forget to remove it from docker files too
+            dotnet publish ArchiSteamFarm -c "$env:CONFIGURATION" -f "$targetFramework" -o "out\$variant" /nologo "/p:ASFVariant=$variant" "/p:LinkDuringPublish=false"
+        } else {
+            dotnet publish ArchiSteamFarm -c "$env:CONFIGURATION" -f "$targetFramework" -o "out\$variant" -r "$variant" /nologo "/p:ASFVariant=$variant" "/p:CrossGenDuringPublish=false"
+        }
+
+        if ($LastExitCode -ne 0) {
+            throw "Last command failed."
+        }
+
+        # If we include any helper scripts for this variant, copy them to output directory
+        if (Test-Path -Path "ArchiSteamFarm\scripts\$variant" -PathType Container) {
+            Copy-Item "ArchiSteamFarm\scripts\$variant\*" -Destination "ArchiSteamFarm\out\$variant"
+        }
+
+        if ($targetFramework -eq "$env:NET_CORE_VERSION") {
+            # Until https://github.com/dotnet/cli/issues/3267 happens, we'll hack dotnet binary icon on Windows and include .ico file on other platforms
+            if (Test-Path -Path "ArchiSteamFarm\out\$variant\ArchiSteamFarm.exe" -PathType Leaf) {
+                tools\rcedit\rcedit-x64.exe "ArchiSteamFarm\out\$variant\ArchiSteamFarm.exe" --set-icon 'resources\ASF.ico'
+
+                if ($LastExitCode -ne 0) {
+                    throw "Last command failed."
+                }
+            } else {
+                Copy-Item 'resources\ASF.ico' -Destination "ArchiSteamFarm\out\$variant\ArchiSteamFarm.ico"
+            }
+        }
+
+        if ($env:APPVEYOR_REPO_TAG -eq 'true') {
+            # Update link in Changelog.html accordingly
+            if (Test-Path -Path "ArchiSteamFarm\out\$variant\Changelog.html" -PathType Leaf) {
+                (Get-Content -Path "ArchiSteamFarm\out\$variant\Changelog.html").Replace('ArchiSteamFarm/commits/master', "ArchiSteamFarm/releases/tag/$env:APPVEYOR_REPO_TAG_NAME") | Set-Content -Path "ArchiSteamFarm\out\$variant\Changelog.html"
+            }
+
+            if ($env:APPVEYOR_BUILD_WORKER_IMAGE -eq 'Visual Studio 2017') {
+                $compressionArgs = '-mx=9', '-mpass=15'
+
+                if ($compressionMethod -eq 'Deflate64') {
+                    $compressionArgs += '-mfb=257'
+                } else {
+                    $compressionArgs += '-mfb=258'
+                }
+            }
+        } else {
+            $compressionArgs = '-mx=1'
+        }
+
+        7z a -bd -tzip "-mm=$compressionMethod" $compressionArgs "ArchiSteamFarm\out\ASF-$variant.zip" "$env:APPVEYOR_BUILD_FOLDER\ArchiSteamFarm\out\$variant\*"
+
+        if ($LastExitCode -ne 0) {
+            throw "Last command failed."
+        }
+
+        # TODO: Change me to Push-AppveyorArtifact once https://github.com/appveyor/ci/issues/2183 is fixed
+        appveyor PushArtifact "ArchiSteamFarm\out\ASF-$variant.zip" -FileName "ASF-$variant.zip" -DeploymentName "ASF-$variant.zip"
+
+        if ($LastExitCode -ne 0) {
+            throw "Last command failed."
+        }
+    }
+
+    foreach ($variant in $env:SINGLE_VARIANTS.Split([char[]] $null, [System.StringSplitOptions]::RemoveEmptyEntries)) {
+        Start-Job -Name "$variant" -ScriptBlock $PublishBlock -ArgumentList "$variant"
+        Get-Job | Receive-Job -AutoRemoveJob -Wait
+    }
+
+    foreach ($variant in $env:VARIANTS.Split([char[]] $null, [System.StringSplitOptions]::RemoveEmptyEntries)) {
+        Start-Job -Name "$variant" -ScriptBlock $PublishBlock -ArgumentList "$variant"
+    }
+
+    Get-Job | Receive-Job -AutoRemoveJob -Wait
+deploy:
+- provider: GitHub
+  tag: $(appveyor_repo_tag_name)
+  release: ArchiSteamFarm V$(appveyor_repo_tag_name)
+  description: '**NOTICE: Pre-releases are experimental versions that often contain unpatched bugs, work-in-progress features or rewritten implementations. If you don''t consider yourself advanced user, please download **[latest stable release](https://github.com/JustArchi/ArchiSteamFarm/releases/latest)** instead. Pre-release versions are dedicated to users who know how to report bugs, deal with issues and give feedback - no technical support will be given. Check out ASF **[release cycle](https://github.com/JustArchi/ArchiSteamFarm/wiki/Release-cycle)** if you''d like to learn more.**\n\n---\n\nThis is automated AppVeyor GitHub deployment, human-readable changelog should be available soon. In the meantime please refer to **[GitHub commits](https://github.com/JustArchi/ArchiSteamFarm/commits/$(appveyor_repo_tag_name))**.\n\n---\n\nASF is available for free. If you''re grateful for what we''re doing, please consider donating. Developing ASF requires massive amount of time and knowledge, especially when it comes to Steam (and its problems). Even $1 is highly appreciated and shows that you care. Thank you!\n\n [![Patreon support](https://img.shields.io/badge/Patreon-support-yellow.svg)](https://www.patreon.com/JustArchi) [![Paypal.me donate](https://img.shields.io/badge/Paypal.me-donate-yellow.svg)](https://www.paypal.me/JustArchi/5usd) [![Paypal donate](https://img.shields.io/badge/Paypal-donate-yellow.svg)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=HD2P2P3WGS5Y4) [![Bitcoin donate](https://img.shields.io/badge/Bitcoin-donate-yellow.svg)](https://blockchain.info/payment_request?address=1Archi6M1r5b41Rvn1SY2FfJAzsrEUT7aT) [![Steam donate](https://img.shields.io/badge/Steam-donate-yellow.svg)](https://steamcommunity.com/tradeoffer/new/?partner=46697991&token=0ix2Ruv_)'
+  auth_token:
+    secure: QC5gIDMvSpd43EG6qW8d1E3ZHiVU4aR7pbKQonXstjj/JtAABf5S1IbtoY4OsnOR
+  artifact: /.*/
+  draft: false
+  prerelease: true
+  force_update: false
+  on:
+    branch: master
+    configuration: Release
+    appveyor_build_worker_image: Visual Studio 2017
+    appveyor_repo_tag: true
+notifications:
+- provider: Webhook
+  url:
+    secure: i/og7KzkpbcWcKoUubrLH+KB6bkfqA55FHUlGxLepLmgZNQeNMiMoAFICOFY795fFrFfUNUKqwk7ApXE6HUyWMoiijLj7G/JBLTPkBiTCu8fZMTMqwQm6FiHB3+/0h0C+ukcrBEqnXYSQUh6znpKqJSTrIfXUQ7ftNuC966kBAw=
+  method: POST
+  body: >-
+    {
+    	"avatar_url": "https://www.appveyor.com/assets/img/appveyor-logo-256.png",
+    	"username": "AppVeyor",
+    	"content": "[{{projectName}}:{{branch}}] {{commitMessage}} by {{committerName}} ({{commitId}}) | {{buildUrl}} | **{{status}}**"
+    }
+  on_build_success: true
+  on_build_failure: true
+  on_build_status_changed: false
