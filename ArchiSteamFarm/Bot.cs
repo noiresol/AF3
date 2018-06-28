@@ -2145,9 +2145,6 @@ namespace ArchiSteamFarm {
 
 					Utilities.InBackground(InitializeFamilySharing);
 
-					if (Statistics != null) {
-						Utilities.InBackground(Statistics.OnLoggedOn);
-					}
 
 					if (BotConfig.SteamMasterClanID != 0) {
 						Utilities.InBackground(async () => {
